@@ -57,6 +57,22 @@ function expandTarget(target: string, captured: string): string {
   return target.replaceAll('*', captured)
 }
 
+/** Project CSS modules keep their hashed export names; dependency CSS is empty. */
+function cssModulePlugin(): Plugin {
+  return {
+    name: 'vitest-css-modules',
+    enforce: 'pre',
+    load(id) {
+      const file = id.split('?')[0] ?? id
+      if (!file.endsWith('.css') || file.includes(`${join('src', '')}`)) return null
+      if (file.includes('/node_modules/')) {
+        return 'export default new Proxy({}, { get: (_target, key) => String(key) })'
+      }
+      return null
+    },
+  }
+}
+
 function harnessPathsPlugin(): Plugin | null {
   if (harnessRoot === null) return null
   const map = JSON.parse(readFileSync(join(root, 'tsconfig.paths.json'), 'utf8')) as PathMap
@@ -108,7 +124,7 @@ function harnessPathsPlugin(): Plugin | null {
 
 export default defineConfig({
   root,
-  plugins: [harnessPathsPlugin()].filter((plugin): plugin is Plugin => plugin !== null),
+  plugins: [cssModulePlugin(), harnessPathsPlugin()].filter((plugin): plugin is Plugin => plugin !== null),
   resolve: {
     alias: {
       react: resolve(root, 'node_modules/react'),
@@ -119,10 +135,13 @@ export default defineConfig({
       '@deepseek-ai/dsh-client-runtime/client': resolve(root, 'repro/shims/client-runtime.ts'),
       '@deepseek-ai/dsh-client-runtime': resolve(root, 'repro/shims/client-runtime.ts'),
       '@deepseek-ai/dsh-client-store': resolve(root, 'repro/shims/client-runtime.ts'),
+      '@deepseek-ai/dsh-client-locale/client': resolve(root, 'repro/shims/locale-runtime.ts'),
+      '@deepseek-ai/dsh-client-ui-primitives': resolve(root, 'repro/shims/primitives.tsx'),
     },
   },
   test: {
     environment: 'jsdom',
     include: ['tests/**/*.spec.tsx'],
+    execArgv: ['--experimental-strip-types', '--import', './repro/shims/css-register.mjs'],
   },
 })

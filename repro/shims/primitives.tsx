@@ -103,8 +103,20 @@ export function MarkdownText({ text }: { text?: string }) {
   return <div style={{ whiteSpace: 'pre-wrap' }}>{text}</div>
 }
 
-export function Tooltip({ children }: { children?: React.ReactNode }) {
-  return <>{children}</>
+export function Tooltip({
+  label,
+  children,
+}: {
+  label?: React.ReactNode
+  children?: React.ReactNode
+}) {
+  const [open, setOpen] = React.useState(false)
+  return (
+    <span onMouseEnter={() => { setOpen(true) }} onMouseLeave={() => { setOpen(false) }}>
+      {children}
+      {open && label !== undefined ? <span role="tooltip">{label}</span> : null}
+    </span>
+  )
 }
 
 export function Button({ children, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) {

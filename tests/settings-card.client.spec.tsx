@@ -304,6 +304,7 @@ describe('smooth-stream settings card', () => {
     expect(call).toHaveBeenCalledWith(STREAM_SETTINGS_RPC_CHANNEL, STREAM_SETTINGS_RPC.write, {
       enabled: true,
       controlScroll: true,
+      preset: 'silky',
       motionPreference: 'auto',
       thinkAutoExpand: false,
       logarithmicFade: true,
@@ -319,7 +320,8 @@ describe('smooth-stream settings card', () => {
     render(<SmoothStreamCard {...cardProps(face)} />)
 
     fireEvent.click(screen.getByRole('button', { name: /smooth stream/i }))
-    const radios = screen.getAllByRole('radio')
+    const motion = screen.getByRole('radiogroup', { name: en.motionPreference })
+    const radios = [...motion.querySelectorAll('input[type="radio"]')]
     expect(radios).toHaveLength(3)
     expect(radios.map(radio => (radio as HTMLInputElement).checked)).toEqual([true, false, false])
     fireEvent.click(radios[1]!)
@@ -381,6 +383,7 @@ describe('smooth-stream settings card', () => {
     expect(call).toHaveBeenCalledWith(STREAM_SETTINGS_RPC_CHANNEL, STREAM_SETTINGS_RPC.write, {
       enabled: false,
       controlScroll: true,
+      preset: 'silky',
       motionPreference: 'auto',
       thinkAutoExpand: true,
       logarithmicFade: true,
