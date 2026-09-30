@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { basename, dirname, resolve as resolvePath } from 'node:path'
 import { defineConfig, type UserConfig } from 'tsdown'
 import { transform } from 'lightningcss'
+import { STREAM_PACKAGE_NAME } from './src/package-meta.ts'
 
 const PACKAGE_ID = 'dsh-smooth-stream'
 const CSS_VIRTUAL_PREFIX = '\0dsh-css:'
@@ -120,7 +121,7 @@ const clientBundle: UserConfig = {
   }],
   outputOptions: {
     entryFileNames: 'client.js',
-    banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(PACKAGE_ID)}, factory: (require) => {`,
+    banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(STREAM_PACKAGE_NAME)}, factory: (require) => {`,
     footer: 'return module.exports; } });',
     intro: 'var module = { exports: {} }; var exports = module.exports;',
   },
