@@ -663,6 +663,7 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   controlScroll = true,
   motionPreference = DEFAULT_STREAM_SETTINGS.motionPreference,
   node,
+  groupPart,
   useTurnData,
   openFile,
   loadImage,
@@ -670,6 +671,12 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   turnProcess,
   t,
 }: AssistantProps & {
+  /**
+   * 0.2 splits one assistant step into a reasoning seat and a response seat.
+   * Older hosts omit it, and the whole step still renders together.
+   */
+  groupPart?: 'reasoning' | 'response' | undefined
+} & {
   mode?: StreamMode
   preset?: StreamSmoothingPreset
   revealCharsPerSec?: number
@@ -748,13 +755,14 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   const imageLoader: ImageLoader = loadImage ?? (async () => {
     throw new Error(t('image.serviceUnavailable'))
   })
-  const hasVisible = streaming
-    || data.status === 'interrupted'
-    || data.blocks.some(block => block.kind !== 'tool-call')
-  if (!hasVisible) return null
+  const visibleBlock = (kind: string): boolean => (
+    groupPart === undefined
+    || (groupPart === 'reasoning' ? kind === 'reasoning' : kind !== 'reasoning')
+  )
+  const hasContent = data.blocks.some(block => visibleBlock(block.kind) && block.kind !== 'tool-call')
+  if (!(streaming || data.status === 'interrupted' || hasContent)) return null
   const announcementText = data.blocks
-    .filter(block => block.kind === 'text')
-    .map(block => block.text)
+    .flatMap(block => block.kind === 'text' && visibleBlock(block.kind) ? [block.text] : [])
     .join('\n')
 
   const rendered: ReactNode[] = []
@@ -763,12 +771,13 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   let lastText = -1
   for (let index = 0; index < data.blocks.length; index += 1) {
     const kind = data.blocks[index]?.kind
+    if (kind === undefined || !visibleBlock(kind)) continue
     if (kind === 'text' || kind === 'reasoning') lastFollow = index
     if (kind === 'text') lastText = index
   }
   for (let index = 0; index < data.blocks.length; index += 1) {
     const block = data.blocks[index]
-    if (block === undefined) continue
+    if (block === undefined || !visibleBlock(block.kind)) continue
     switch (block.kind) {
       case 'text':
         if (!streaming && block.text.trim() === '') break
@@ -854,7 +863,9 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
       >
         <div className={css.body}>
           {rendered}
-          {data.status === 'interrupted' && <span className={css.stopped}>{t('message.stopped')}</span>}
+          {data.status === 'interrupted'
+            && (groupPart === undefined || groupPart === 'response')
+            && <span className={css.stopped}>{t('message.stopped')}</span>}
         </div>
       </FollowHost>
     </div>

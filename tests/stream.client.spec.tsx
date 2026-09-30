@@ -880,6 +880,37 @@ describe('assistant renderer', () => {
     expect(view.container.textContent).toContain(LONG_STREAM_TEXT)
   })
 
+  it('renders only the reasoning block on a 0.2 reasoning seat', () => {
+    const view = render(
+      <TypewriterAssistantNodeView
+        {...assistantProps('running', [
+          { kind: 'reasoning', text: 'checking the plan' },
+          { kind: 'text', text: 'the answer itself' },
+        ])}
+        groupPart="reasoning"
+      />,
+    )
+    expect(view.container.textContent).toContain('checking the plan')
+    expect(view.container.textContent).not.toContain('the answer itself')
+    expect(view.container.querySelector('[data-variant="think"]')).not.toBeNull()
+  })
+
+  it('keeps reasoning out of a 0.2 response seat so the answer can stream', async () => {
+    const view = render(
+      <TypewriterAssistantNodeView
+        {...assistantProps('running', [
+          { kind: 'reasoning', text: 'checking the plan' },
+          { kind: 'text', text: 'the answer itself' },
+        ])}
+        groupPart="response"
+      />,
+    )
+    expect(view.container.querySelector('[data-variant="think"]')).toBeNull()
+    await act(() => vi.advanceTimersByTimeAsync(4000))
+    expect(view.container.textContent).toContain('the answer itself')
+    expect(view.container.querySelector('[data-variant="think"]')).toBeNull()
+  })
+
   it('hides answer-inline reasoning when the Host folds the turn process', () => {
     const setOpen = vi.fn()
     const view = render(
