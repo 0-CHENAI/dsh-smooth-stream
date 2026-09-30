@@ -90,13 +90,13 @@ Verified by local browser-level audit suites:
 Inside your DeepSeek Harness repository checkout:
 
 ```sh
-pnpm dsh plugin --profile web add dsh-smooth-stream
+pnpm dsh plugin --profile web add @laufry/dsh-smooth-stream
 ```
 
 If `dsh` is in your system `PATH`:
 
 ```sh
-dsh plugin --profile web add dsh-smooth-stream
+dsh plugin --profile web add @laufry/dsh-smooth-stream
 ```
 
 Start the interface:
@@ -107,7 +107,7 @@ pnpm dsh web
 
 Verify that `[dsh-smooth-stream] plugin loaded!` appears in the host startup logs.
 
-To uninstall: `pnpm dsh plugin --profile web remove dsh-smooth-stream`.
+To uninstall: `pnpm dsh plugin --profile web remove @laufry/dsh-smooth-stream`.
 
 ---
 

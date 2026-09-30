@@ -89,13 +89,13 @@
 在 DeepSeek Harness 源码根目录运行：
 
 ```sh
-pnpm dsh plugin --profile web add dsh-smooth-stream
+pnpm dsh plugin --profile web add @laufry/dsh-smooth-stream
 ```
 
 如果系统 `PATH` 中已有 `dsh`：
 
 ```sh
-dsh plugin --profile web add dsh-smooth-stream
+dsh plugin --profile web add @laufry/dsh-smooth-stream
 ```
 
 启动界面：
@@ -106,7 +106,7 @@ pnpm dsh web
 
 Host 日志中显示 `[dsh-smooth-stream] plugin loaded!` 即表示已成功加载。
 
-卸载命令：`pnpm dsh plugin --profile web remove dsh-smooth-stream`。
+卸载命令：`pnpm dsh plugin --profile web remove @laufry/dsh-smooth-stream`。
 
 ---
 
