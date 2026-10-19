@@ -91,6 +91,7 @@
     "stress:120fps": "node scripts/stress-test-120fps.mjs",
     "test:rebound": "node scripts/verify-y-rebound.mjs",
     "prepack": "pnpm build",
+    "release": "node scripts/release.mjs",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --pretty false",
     "test:smooth": "node scripts/verify-y-rebound.mjs && node scripts/probe-tailbob.mjs 1200 20 && node scripts/verify-overflow.mjs --runs 3",

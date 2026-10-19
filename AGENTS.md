@@ -15,6 +15,7 @@
 - `pnpm exec vitest run tests/stream.client.spec.tsx` runs one test file.
 - `pnpm benchmark` records stream-engine performance; review result changes manually.
 - `pnpm build:repro` rebuilds the standalone reproduction bundle after changing `repro/main.tsx` or its styles.
+- `pnpm release <patch|minor|major|prerelease|x.y.z[-pre]>` bumps `package.json`, rebuilds `lib/`, gates on typecheck + tests, then commits, tags `vX`, and pushes; the tag is what publishes to npm. See `docs/releasing.md`.
 
 ## Coding Style & Naming Conventions
 
