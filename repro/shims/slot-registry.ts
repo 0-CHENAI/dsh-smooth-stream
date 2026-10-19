@@ -71,29 +71,37 @@ export class SlotRegistry extends Service {
   }
 
   inject(key: string, callback: () => (() => void) | Iterable<() => void>): () => void {
-    let disposers: Array<() => void> = []
-    let installed = false
-    const install = (): void => {
-      if (installed) return
-      installed = true
-      const effect = callback()
-      disposers = typeof effect === 'function' ? [effect] : [...effect]
-    }
-    if (this.records.has(key)) install()
-    else {
-      let pending = this.waits.get(key)
-      if (pending === undefined) {
-        pending = new Set()
-        this.waits.set(key, pending)
+    // The real SlotRegistry scopes the injected callback to the fiber that
+    // called `inject`, so a plugin unload releases whatever the callback
+    // registered. Mirror that through the caller context's effect scope; the
+    // service tracker makes `this.ctx` the calling fiber rather than the
+    // registry's own context.
+    const release = this.ctx.effect(() => {
+      let disposers: Array<() => void> = []
+      let installed = false
+      const install = (): void => {
+        if (installed) return
+        installed = true
+        const effect = callback()
+        disposers = typeof effect === 'function' ? [effect] : [...effect]
       }
-      pending.add(install)
-    }
-    return () => {
-      this.waits.get(key)?.delete(install)
-      for (const dispose of disposers.reverse()) dispose()
-      disposers = []
-      installed = false
-    }
+      if (this.records.has(key)) install()
+      else {
+        let pending = this.waits.get(key)
+        if (pending === undefined) {
+          pending = new Set()
+          this.waits.set(key, pending)
+        }
+        pending.add(install)
+      }
+      return () => {
+        this.waits.get(key)?.delete(install)
+        for (const dispose of disposers.reverse()) dispose()
+        disposers = []
+        installed = false
+      }
+    }, `slots.inject:${key}`)
+    return () => { void release() }
   }
 
   entries(key: string): readonly StoredEntry[] {
