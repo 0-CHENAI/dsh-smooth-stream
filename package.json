@@ -16,6 +16,9 @@
     "url": "https://github.com/0-CHENAI/dsh-smooth-stream/issues"
   },
   "homepage": "https://laplace-bit.github.io/dsh-smooth-stream/",
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",

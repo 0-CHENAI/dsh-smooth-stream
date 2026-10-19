@@ -3,7 +3,7 @@
 > **Transform jumpy AI outputs into a calm, teleprompter-smooth reading experience.**  
 > Physics-based stream rendering and zero-reflow viewport tracking for the DeepSeek Harness (`dsh`) Web UI.
 
-English · [中文](README.md) · [Homepage](https://laplace-bit.github.io/dsh-smooth-stream/) · [How It Works](https://laplace-bit.github.io/dsh-smooth-stream/how-it-works.html) · [npm](https://www.npmjs.com/package/dsh-smooth-stream)
+English · [中文](README.md) · [Homepage](https://laplace-bit.github.io/dsh-smooth-stream/) · [How It Works](https://laplace-bit.github.io/dsh-smooth-stream/how-it-works.html) · [npm](https://www.npmjs.com/package/@laufry/dsh-smooth-stream)
 
 ---
 
@@ -152,6 +152,15 @@ For a local preview, run `pnpm build:repro`, serve the repository with `python3 
 - **Auto-expand thinking**: Controls whether reasoning opens automatically while streaming.
 - **Collapse finished work** (default on): Folds thoughts and tool steps into a summary line once the turn settles.
 - **Show render diagnostics** (default off): Opens a live HUD on the right side to inspect FPS, character backlog, spring state, and adjust physical parameters in real time.
+
+---
+
+## Releasing
+
+1. Bump `version` in `package.json` and commit that change.
+2. Push the matching tag: `git tag vX.Y.Z && git push origin vX.Y.Z`. Version `0.8.0-rc.1` corresponds to tag `v0.8.0-rc.1`.
+
+Pushing a `v*` tag runs `.github/workflows/publish.yml` and publishes with npm Trusted Publishing. Versions that contain `-` are published on the `next` dist-tag; other versions use `latest`. You can also run that workflow manually from the tag.
 
 ---
 

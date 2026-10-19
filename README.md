@@ -3,7 +3,7 @@
 > **让 AI 的长篇生成如提词器般温润流淌。**  
 > 为 DeepSeek Harness（`dsh`）打造的二阶弹簧物理流式渲染与零重排跟随引擎。
 
-[English](README.en.md) · [项目主页](https://laplace-bit.github.io/dsh-smooth-stream/) · [工作原理与基准](https://laplace-bit.github.io/dsh-smooth-stream/how-it-works.html) · [npm](https://www.npmjs.com/package/dsh-smooth-stream)
+[English](README.en.md) · [项目主页](https://laplace-bit.github.io/dsh-smooth-stream/) · [工作原理与基准](https://laplace-bit.github.io/dsh-smooth-stream/how-it-works.html) · [npm](https://www.npmjs.com/package/@laufry/dsh-smooth-stream)
 
 ---
 
@@ -152,6 +152,15 @@ Host 日志中显示 `[dsh-smooth-stream] plugin loaded!` 即表示已成功加�
 本地淡入预览：执行 `pnpm build:repro`，在仓库根目录启动 `python3 -m http.server 8765 --bind 127.0.0.1`，打开 `http://127.0.0.1:8765/repro/index.html?demo=fade`。预览包含暂停、停止、深浅主题、高速分片和代码/公式保护样例，复用真实输出引擎，富文本为测试样例。
 
 执行 `node scripts/verify-logarithmic-fade.mjs` 可验证并录制预览（需要 Chrome 和 `pnpm exec playwright-core install ffmpeg`；其他 Chrome 路径可用 `CHROME_BIN` 指定），报告与视频保存在未跟踪的 `repro/artifacts/logarithmic-fade/`。
+
+---
+
+## 发布
+
+1. 修改 `package.json` 的 `version` 并提交。
+2. 推送与该版本一致的 tag：`git tag vX.Y.Z && git push origin vX.Y.Z`。版本 `0.8.0-rc.1` 对应 tag `v0.8.0-rc.1`。
+
+推送 `v*` tag 会运行 `.github/workflows/publish.yml`，通过 npm Trusted Publishing 发布。版本号里含 `-` 的预发布版使用 dist-tag `next`，其余版本使用 `latest`。也可以在该 tag 上手动运行这个 workflow。
 
 ---
 

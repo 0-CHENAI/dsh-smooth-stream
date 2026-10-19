@@ -1,0 +1,145 @@
+name: Publish Package
+
+# npm Trusted Publishing validates the workflow file that starts the job.
+# This filename must stay publish.yml. Do not route publish through
+# workflow_call or a reusable workflow: npm checks the caller filename.
+# The trusted publisher has no GitHub environment, so this job sets none.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          cache: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Drop setup-node auth placeholder
+        shell: bash
+        run: |
+          set -euo pipefail
+          npmrc="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          if [[ ! -f "$npmrc" ]]; then
+            echo "setup-node did not write an npmrc at $npmrc" >&2
+            exit 1
+          fi
+          grep -v '_authToken' "$npmrc" > "${npmrc}.tmp"
+          mv "${npmrc}.tmp" "$npmrc"
+          if ! grep -q 'registry.npmjs.org' "$npmrc"; then
+            echo "npmrc is missing the npmjs registry" >&2
+            exit 1
+          fi
+          # setup-node exports a dummy NODE_AUTH_TOKEN when none was provided.
+          # Clear it so later steps cannot present that placeholder as a credential.
+          echo 'NODE_AUTH_TOKEN=' >> "$GITHUB_ENV"
+
+      - name: Check tag matches package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs'
+
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
+          const version = String(pkg.version ?? '')
+          const expected = `v${version}`
+          const ref = process.env.GITHUB_REF ?? ''
+          const refType = process.env.GITHUB_REF_TYPE ?? ''
+          const refName = process.env.GITHUB_REF_NAME ?? ''
+          const repo = typeof pkg.repository === 'string'
+            ? pkg.repository
+            : String(pkg.repository?.url ?? '')
+
+          if (pkg.name !== '@laufry/dsh-smooth-stream') {
+            console.error(`Refusing to publish unexpected package name ${pkg.name}`)
+            process.exit(1)
+          }
+          if (!repo.includes('github.com/0-CHENAI/dsh-smooth-stream')) {
+            console.error(`repository.url must point at github.com/0-CHENAI/dsh-smooth-stream, got ${repo}`)
+            process.exit(1)
+          }
+          if (refType !== 'tag' || !ref.startsWith('refs/tags/') || refName !== expected) {
+            console.error(`Ref ${ref || '(empty)'} (${refType || 'unknown'}) does not match package.json version ${expected}.`)
+            console.error(`Push tag ${expected} on the commit that contains this version, or run workflow_dispatch from that tag.`)
+            process.exit(1)
+          }
+          console.log(`Tag ${refName} matches ${pkg.name}@${version}`)
+          NODE
+
+      - name: Ensure npm supports trusted publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { execSync } from 'node:child_process'
+
+          const parse = (version) => version.trim().split('.').map((part) => Number.parseInt(part, 10))
+          const satisfies = (version) => {
+            const [major, minor, patch] = parse(version)
+            if ([major, minor, patch].some((part) => Number.isNaN(part))) return false
+            return major > 11 || (major === 11 && (minor > 5 || (minor === 5 && patch >= 1)))
+          }
+
+          let version = execSync('npm --version', { encoding: 'utf8' })
+          if (!satisfies(version)) {
+            console.log(`npm ${version.trim()} is below 11.5.1; installing npm@latest`)
+            execSync('npm install -g npm@latest', { stdio: 'inherit' })
+            version = execSync('npm --version', { encoding: 'utf8' })
+          }
+          if (!satisfies(version)) {
+            console.error(`npm ${version.trim()} still does not satisfy >=11.5.1`)
+            process.exit(1)
+          }
+          console.log(`npm ${version.trim()} supports trusted publishing`)
+          NODE
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; process.stdout.write(JSON.parse(readFileSync("package.json", "utf8")).version)')"
+          if [[ "$version" == *-* ]]; then
+            echo "Publishing ${version} on dist-tag next"
+            npm publish --access public --tag next
+          else
+            echo "Publishing ${version} on dist-tag latest"
+            npm publish --access public
+          fi
