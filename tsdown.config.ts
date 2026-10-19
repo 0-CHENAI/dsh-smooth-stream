@@ -98,7 +98,12 @@ const clientBundle: UserConfig = {
         minify: true,
       })
       const classMap: Record<string, string> = {}
-      for (const [local, exp] of Object.entries(cssExports ?? {})) classMap[local] = exp.name
+      // lightningcss returns the module exports in hash-map order, which changes
+      // per process; sorting keeps rebuilt bundles byte-stable across machines
+      // and runs so release commits only contain real changes.
+      for (const [local, exp] of Object.entries(cssExports ?? {}).sort(([left], [right]) => left.localeCompare(right))) {
+        classMap[local] = exp.name
+      }
       return [
         `const css = ${JSON.stringify(code.toString())};`,
         `const tagId = ${JSON.stringify(`${PACKAGE_ID}/${basename(fileId)}`)};`,
