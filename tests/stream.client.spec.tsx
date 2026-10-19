@@ -802,6 +802,10 @@ describe('assistant renderer', () => {
 
     try {
       port.scrollTop = 390
+      // Mount runs before clientHeight exists, so the layout-phase prime is a
+      // no-op. The first callback only seeds FrameCoordinator's clock. Prime
+      // at the pre-jump height, then let the 100ms gap clamp to one 32ms step.
+      act(() => frames.shift()?.(0))
       act(() => frames.shift()?.(0))
       const before = -port.scrollTop + currentTranslate(transcript)
       baseHeight = 700
@@ -3635,6 +3639,10 @@ describe('isGrowingChatNode', () => {
     vi.spyOn(status, 'getBoundingClientRect').mockReturnValue({ top: 160, bottom: 186 } as DOMRect)
     port.scrollTop = 400
 
+    // jsdom reports clientHeight 0 during the mount layout effect, so the
+    // synchronous prime does not run. The first animation frame only seeds
+    // FrameCoordinator's clock; the next one is the entrance paint.
+    await act(() => vi.advanceTimersByTimeAsync(16))
     await act(() => vi.advanceTimersByTimeAsync(16))
     const entered = currentTranslate(transcript)
     expect(entered).toBeGreaterThan(8)

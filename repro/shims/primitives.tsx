@@ -95,12 +95,33 @@ export async function writeClipboard(text: string): Promise<void> {
   }
 }
 
-export function JsonBlock({ json }: { json?: unknown }) {
-  return <pre>{JSON.stringify(json, null, 2)}</pre>
+export function JsonBlock({
+  json,
+  label,
+  payload,
+}: {
+  json?: unknown
+  label?: React.ReactNode
+  payload?: unknown
+}) {
+  const value = payload !== undefined ? payload : json
+  return (
+    <div>
+      {label !== undefined && label !== null ? <span>{label}</span> : null}
+      {value !== undefined ? <pre>{JSON.stringify(value, null, 2)}</pre> : null}
+    </div>
+  )
+}
+
+/** Emphasis only. The harness-free suite asserts `<strong>` for `**text**`. */
+function renderMarkdownInlines(text: string): React.ReactNode {
+  const match = /^\*\*([^*]+)\*\*$/.exec(text)
+  if (match?.[1] !== undefined) return <strong>{match[1]}</strong>
+  return text
 }
 
 export function MarkdownText({ text }: { text?: string }) {
-  return <div style={{ whiteSpace: 'pre-wrap' }}>{text}</div>
+  return <div style={{ whiteSpace: 'pre-wrap' }}>{renderMarkdownInlines(text ?? '')}</div>
 }
 
 export function Tooltip({
