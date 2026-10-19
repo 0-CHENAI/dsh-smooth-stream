@@ -423,9 +423,63 @@ function resizeProxyOf(port: HTMLElement): HTMLElement | null {
  * child therefore rides the same transform, keeping the visual order of the
  * column intact.
  */
+interface SurfaceCacheRecord {
+  flow: HTMLElement | null
+  childCount: number
+  firstElement: Element | null
+  lastElement: Element | null
+  surfaces: HTMLElement[]
+  status: HTMLElement | null
+  revision: number
+}
+
+const surfaceCache = new WeakMap<HTMLElement, SurfaceCacheRecord>()
+const portRevisions = new WeakMap<HTMLElement, number>()
+
+export function invalidateSurfaceCache(port?: HTMLElement | null): void {
+  if (!port) return
+  portRevisions.set(port, (portRevisions.get(port) ?? 0) + 1)
+}
+
+function isSurfaceCacheValid(port: HTMLElement, cache: SurfaceCacheRecord): boolean {
+  const currentRev = portRevisions.get(port) ?? 0
+  if (cache.revision !== currentRev) return false
+
+  const flow = flowElementOf(port)
+  if (flow !== cache.flow) return false
+  if (flow === null) return false
+
+  if (flow.children.length !== cache.childCount) return false
+  if (flow.firstElementChild !== cache.firstElement) return false
+  if (flow.lastElementChild !== cache.lastElement) return false
+  if (cache.surfaces.some(surface => !port.contains(surface))) return false
+
+  return true
+}
+
 export function shiftSurfacesOf(port: HTMLElement): HTMLElement[] {
+  const cached = surfaceCache.get(port)
+  if (cached && isSurfaceCacheValid(port, cached)) {
+    return cached.surfaces
+  }
+
   const transcript = port.querySelector<HTMLElement>('[data-chat-transcript]')
-  if (transcript !== null) return [transcript]
+  if (transcript !== null) {
+    const flow = flowElementOf(port)
+    const status = turnStatusOf(port)
+    const entry: SurfaceCacheRecord = {
+      flow,
+      childCount: flow?.children.length ?? 0,
+      firstElement: flow?.firstElementChild ?? null,
+      lastElement: flow?.lastElementChild ?? null,
+      surfaces: [transcript],
+      status,
+      revision: portRevisions.get(port) ?? 0,
+    }
+    surfaceCache.set(port, entry)
+    return entry.surfaces
+  }
+
   const anchored = [...port.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')]
     .filter(row => row.parentElement?.closest('[data-chat-anchor-key]') === null)
   const flow = port.querySelector<HTMLElement>('[data-chat-flow]')
@@ -435,13 +489,26 @@ export function shiftSurfacesOf(port: HTMLElement): HTMLElement[] {
   // One document-order pass: an anchored row, or a foreign child that contains
   // no anchored row of its own (a wrapper around real rows would double-shift
   // the rows inside it).
-  return [...flow.children].filter((child): child is HTMLElement =>
+  const surfaces = [...flow.children].filter((child): child is HTMLElement =>
     child instanceof HTMLElement
     && child !== status
     && (anchoredSet.has(child) || child.querySelector('[data-chat-anchor-key]') === null))
+
+  const entry: SurfaceCacheRecord = {
+    flow,
+    childCount: flow.children.length,
+    firstElement: flow.firstElementChild,
+    lastElement: flow.lastElementChild,
+    surfaces,
+    status,
+    revision: portRevisions.get(port) ?? 0,
+  }
+  surfaceCache.set(port, entry)
+  return surfaces
 }
 
-function currentShiftOf(element: HTMLElement): number {
+function currentShiftOf(element: HTMLElement | null | undefined): number {
+  if (!element || !element.style) return 0
   return Number(
     /translate3d\(0(?:px)?,\s*(-?[\d.]+)px,\s*0(?:px)?\)/.exec(element.style.transform)?.[1] ?? 0,
   )
@@ -487,7 +554,14 @@ function setShift(element: HTMLElement, px: number): void {
 
 function turnStatusOf(port: HTMLElement): HTMLElement | null {
   return port.querySelector<HTMLElement>(
-    '[data-chat-turn-status], [data-chat-flow] > [role="status"]',
+    // dsh 0.2.x replaced the per-turn status row with RunningStatus — the
+    // whale tail row `[data-chat-running]`, a persistent last child of the
+    // flow column for the whole running session. Its inner `role="status"`
+    // span is visually-hidden and not a direct flow child, so the old
+    // selector misses it and every status-aware path (shift exclusion,
+    // runway hosting, paint ceiling, unmount compensation, completion
+    // cascade) silently no-ops on 0.2.x.
+    '[data-chat-turn-status], [data-chat-flow] > [role="status"], [data-chat-flow] > [data-chat-running]',
   )
 }
 
@@ -1068,11 +1142,17 @@ function subscribeFollowCommit(port: HTMLElement, fn: () => void): () => void {
   return () => { listeners!.delete(fn) }
 }
 
-function restoreRunway(port: HTMLElement): void {
+export function restoreRunway(port: HTMLElement): void {
   const runway = followRunways.get(port)
-  if (runway === undefined) return
-  runway.element.style[runway.property] = runway.original
-  followRunways.delete(port)
+  for (const surface of shiftSurfacesOf(port)) {
+    if (surface !== runway?.element && isLegacyRunway(surface.style.marginBottom)) surface.style.marginBottom = ''
+  }
+  const status = turnStatusOf(port)
+  if (status !== null && status !== runway?.element && isLegacyRunway(status.style.marginTop)) status.style.marginTop = ''
+  if (runway !== undefined) {
+    runway.element.style[runway.property] = runway.original
+    followRunways.delete(port)
+  }
   invalidatePaintLimit(port)
 }
 
@@ -1773,7 +1853,41 @@ export function useConversationFollow(
     let holding: HTMLElement | null = null
     let entrancePending = entranceRef.current
 
+    /**
+     * Tall-row entrance clamp. A surface shift can only mask lag up to the
+     * real gap to status/composer chrome; a row that commits more than that
+     * (an Edit call with its diff, a wide tool card) repaints the remainder
+     * as an instant upward step — and the 0.2.x host's order-length tail
+     * snap pins scrollTop to the new floor in the same task, so no
+     * scroll-domain lag can be carried either. Reveal the excess through the
+     * wrapper's REAL height instead: clamp it to 0 at prime and raise it at
+     * the spring cadence, so the floor grows gradually and every bottom
+     * writer (this engine and the host snap alike) glides the row in.
+     */
+    let entranceClamp: {
+      readonly element: HTMLElement
+      readonly extent: number
+      /** Wrapper height already committed when the clamp armed (0 on mount). */
+      readonly basePx: number
+      revealedPx: number
+      readonly maxHeight: string
+      readonly overflow: string
+    } | null = null
+
+    const releaseEntranceClamp = (): void => {
+      if (entranceClamp === null) return
+      const clamp = entranceClamp
+      entranceClamp = null
+      clamp.element.style.maxHeight = clamp.maxHeight
+      clamp.element.style.overflow = clamp.overflow
+    }
+
+    const entranceClampLagPx = (): number => entranceClamp === null
+      ? 0
+      : Math.max(0, entranceClamp.extent - entranceClamp.revealedPx)
+
     const finishEntrance = (): void => {
+      releaseEntranceClamp()
       if (!entrancePending) return
       entrancePending = false
       onEntranceSettledRef.current?.()
@@ -1802,6 +1916,7 @@ export function useConversationFollow(
     }
 
     const reportFollow = (next: HTMLElement, isActive: boolean): void => {
+      if (!debugRuntime.isEnabled()) return
       const state = followMotionStates.get(next)
       const phase: FollowTerminalPhase = followTerminalPhases.get(next) ?? (isActive ? 'live' : 'natural')
       const runwayPx = state?.runwayPx ?? runwayOffsetOf(next)
@@ -2185,7 +2300,10 @@ export function useConversationFollow(
         port.addEventListener(name, markGesture, { passive: true })
       }
       if (typeof ResizeObserver !== 'undefined') {
-        resize = new ResizeObserver(() => restoreBeforePaint())
+        resize = new ResizeObserver(() => {
+          invalidateSurfaceCache(port)
+          restoreBeforePaint()
+        })
         resize.observe(port)
         const proxy = resizeProxyOf(port)
         if (proxy !== null) resize.observe(proxy)
@@ -2198,7 +2316,10 @@ export function useConversationFollow(
       if (typeof MutationObserver !== 'undefined') {
         const flow = flowElementOf(port)
         if (flow !== null) {
-          mutations = new MutationObserver(() => { restoreBeforePaint() })
+          mutations = new MutationObserver(() => {
+            invalidateSurfaceCache(port)
+            restoreBeforePaint()
+          })
           mutations.observe(flow, { childList: true, subtree: true })
         }
       }
@@ -2298,6 +2419,37 @@ export function useConversationFollow(
           animatedH = entrancePending
             ? Math.max(0, nextPort.scrollHeight - entranceExtent)
             : nextPort.scrollHeight
+          // The shift path cannot mask an entrance taller than the real gap
+          // to status/composer chrome (the geometry invariant in applyVisual
+          // catches the excess up in the same frame). Clamp the wrapper's
+          // real height here — applyVisual below then measures the
+          // pre-entrance floor and the commit lands with zero visual delta —
+          // and let the frame loop raise the clamp at the spring cadence.
+          // A MOUNT entrance carries the wrapper's full height as the extent
+          // (clamp starts at 0). A growth-pulse re-prime on a settled row
+          // carries only the DELTA: starting at 0 there would collapse the
+          // whole committed row mid-stream and pan the viewport up by its
+          // full height, so the clamp starts at the pre-growth height and
+          // reveals only the delta.
+          if (
+            entrancePending
+            && entranceExtent > safeShiftLimit(nextPort, shiftSurfacesOf(nextPort)) + FOLLOW_SETTLE_EPSILON_PX
+          ) {
+            const fullPx = root.offsetHeight
+            if (fullPx > 0) {
+              const basePx = Math.max(0, fullPx - entranceExtent)
+              entranceClamp = {
+                element: root,
+                extent: entranceExtent,
+                basePx,
+                revealedPx: 0,
+                maxHeight: root.style.maxHeight,
+                overflow: root.style.overflow,
+              }
+              root.style.overflow = 'hidden'
+              root.style.maxHeight = `${basePx}px`
+            }
+          }
           // Established before first paint; the matching margin below is
           // written in the same commit, so this held-and-canceled space
           // never moves a pixel.
@@ -2383,7 +2535,10 @@ export function useConversationFollow(
             updateRevealScale(nextPort, elapsedMs)
             reportFollow(nextPort, activeRef.current)
             const runwayOffset = runwayOffsetOf(nextPort)
-            const entranceLag = Math.max(0, nextPort.scrollHeight - animatedH - runwayOffset)
+            const entranceLag = Math.max(
+              0,
+              nextPort.scrollHeight - animatedH - runwayOffset,
+            ) + entranceClampLagPx()
             if (entranceLag <= FOLLOW_SETTLE_EPSILON_PX) finishEntrance()
           } else {
             finishEntrance()
@@ -2602,29 +2757,52 @@ export function useConversationFollow(
           trajectoryPositionPx = null
           trajectoryWasActive = false
         }
-        const lag = Math.max(0, contentHeight - animatedH - runwayOffset)
-        const step = computeFollowStep(dt, {
-          lag,
-          speedEma: speedCpsRef.current,
-          velocityPxPerSec,
-        }, tuning)
-        if (lag <= 0.1) {
+        if (entranceClamp !== null) {
+          // The clamp IS the entrance lag: the spring drives the wrapper's
+          // real height, every bottom write (ours and the host snap) tracks
+          // the growing floor, and the scroll-domain lag stays drained.
+          const clamp = entranceClamp
+          const remainingPx = Math.max(0, clamp.extent - clamp.revealedPx)
+          const clampStep = computeFollowStep(dt, {
+            lag: remainingPx,
+            speedEma: speedCpsRef.current,
+            velocityPxPerSec,
+          }, tuning)
+          if (remainingPx <= 0.1) {
+            clamp.revealedPx = clamp.extent
+            clamp.element.style.maxHeight = `${clamp.basePx + clamp.extent}px`
+            velocityPxPerSec = 0
+          } else {
+            clamp.revealedPx = Math.min(clamp.extent, clamp.revealedPx + clampStep.advancePx)
+            clamp.element.style.maxHeight = `${clamp.basePx + clamp.revealedPx}px`
+            velocityPxPerSec = clampStep.velocityPxPerSec
+          }
           animatedH = contentHeight - runwayOffset
-          velocityPxPerSec = 0
         } else {
-          // ZERO-DOWNWARD-REBOUND: the reservation is NOT real lag. With the
-          // steady-state tail pin it already rides as baseline-canceled gap
-          // (shift = margin − reservation + reveal lag), so forcing the spring
-          // to stop `reservePx` short of the natural floor — the pre-tail-pin
-          // "hold the reserve as lag" semantic — would double-count it and
-          // repaint the difference as an instant downward step the moment
-          // prediction shuts off. The spring always drains to the natural
-          // floor; the painted shift decays through the rate-limited release.
-          animatedH = Math.min(
-            contentHeight - runwayOffset,
-            animatedH + step.advancePx,
-          )
-          velocityPxPerSec = step.velocityPxPerSec
+          const lag = Math.max(0, contentHeight - animatedH - runwayOffset)
+          const step = computeFollowStep(dt, {
+            lag,
+            speedEma: speedCpsRef.current,
+            velocityPxPerSec,
+          }, tuning)
+          if (lag <= 0.1) {
+            animatedH = contentHeight - runwayOffset
+            velocityPxPerSec = 0
+          } else {
+            // ZERO-DOWNWARD-REBOUND: the reservation is NOT real lag. With the
+            // steady-state tail pin it already rides as baseline-canceled gap
+            // (shift = margin − reservation + reveal lag), so forcing the spring
+            // to stop `reservePx` short of the natural floor — the pre-tail-pin
+            // "hold the reserve as lag" semantic — would double-count it and
+            // repaint the difference as an instant downward step the moment
+            // prediction shuts off. The spring always drains to the natural
+            // floor; the painted shift decays through the rate-limited release.
+            animatedH = Math.min(
+              contentHeight - runwayOffset,
+              animatedH + step.advancePx,
+            )
+            velocityPxPerSec = step.velocityPxPerSec
+          }
         }
       }
       animatedH = applyVisual(
@@ -2671,7 +2849,7 @@ export function useConversationFollow(
       const remainingEntranceLag = Math.max(
         0,
         nextPort.scrollHeight - animatedH - runwayOffsetOf(nextPort),
-      )
+      ) + entranceClampLagPx()
       if (remainingEntranceLag <= FOLLOW_SETTLE_EPSILON_PX) finishEntrance()
       // Stay armed while the reply is streaming or the entrance is settling;
       // the coordinator parks the loop once both are done.
@@ -2689,6 +2867,7 @@ export function useConversationFollow(
     })
     frame(performance.now())
     return () => {
+      releaseEntranceClamp()
       if (!controlScrollRef.current) {
         stopFollowTask()
         if (port !== null) followActivePorts.delete(port)
@@ -2914,7 +3093,10 @@ export function useConversationFollow(
       // active effect's observers were disconnected above, but status/tail
       // commits continue while the detached settle loop owns the port.
       if (typeof ResizeObserver !== 'undefined') {
-        resize = new ResizeObserver(() => restoreBeforePaint())
+        resize = new ResizeObserver(() => {
+          invalidateSurfaceCache(host)
+          restoreBeforePaint()
+        })
         resize.observe(host)
         const proxy = resizeProxyOf(host)
         if (proxy !== null) resize.observe(proxy)
@@ -2922,7 +3104,10 @@ export function useConversationFollow(
       if (typeof MutationObserver !== 'undefined') {
         const flow = flowElementOf(host)
         if (flow !== null) {
-          mutations = new MutationObserver(() => { restoreBeforePaint() })
+          mutations = new MutationObserver(() => {
+            invalidateSurfaceCache(host)
+            restoreBeforePaint()
+          })
           mutations.observe(flow, { childList: true, subtree: true })
         }
       }

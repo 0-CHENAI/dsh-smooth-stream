@@ -30,11 +30,12 @@ export const CHAT_NS = 'smoothStream.chat'
  * dependable Harness owner belong here; anything the Harness already provides
  * must keep coming from the Harness so a language pack can override it.
  */
-export type SmoothStreamChatKey = 'message.think' | 'image.serviceUnavailable'
+export type SmoothStreamChatKey = 'message.think' | 'message.original' | 'image.serviceUnavailable'
 
 /** English fallback for {@link SmoothStreamChatKey}. */
 export const chatEn: Record<SmoothStreamChatKey, string> = {
   'message.think': 'Think',
+  'message.original': 'Original',
   // Removed from the Harness dictionaries in 0.1.5 (rc.6 had it under
   // `conversation`), and the plugin interpolates it into a thrown Error, so
   // the raw key must never reach a reader.
@@ -44,6 +45,7 @@ export const chatEn: Record<SmoothStreamChatKey, string> = {
 /** Simplified Chinese fallback for {@link SmoothStreamChatKey}. */
 export const chatZh: Record<SmoothStreamChatKey, string> = {
   'message.think': '思考',
+  'message.original': '原文',
   'image.serviceUnavailable': '图片服务不可用',
 }
 
@@ -91,7 +93,7 @@ export const en: Record<SmoothStreamLocaleKey, string> = {
   enabled: 'Enable smooth streaming',
   enabledHint: 'Let this plugin render and follow streaming replies. Turn off to use the built-in Harness renderer.',
   controlScroll: 'Take over scrolling',
-  controlScrollHint: 'On by default; smooth-stream writes the conversation scroll position. Turn off to leave bottom-follow to Harness.',
+  controlScrollHint: 'When on, smooth-stream writes the conversation scroll position; when off, bottom-follow is left to Harness (off is the default on Harness 0.1.7 and later).',
   preset: 'Pacing preset',
   presetHint: 'Smoothing cadence profile for text reveal and glide.',
   presetRealtime: 'Realtime',
@@ -198,7 +200,7 @@ export const zh: Record<SmoothStreamLocaleKey, string> = {
   enabled: '启用丝滑流式渲染',
   enabledHint: '由本插件渲染并跟随流式回复；关闭后使用 Harness 内置渲染。',
   controlScroll: '接管滚动',
-  controlScrollHint: '默认开启，由丝滑流式写入会话滚动位置；关闭后贴底滚动交给 Harness。',
+  controlScrollHint: '开启时由丝滑流式写入会话滚动位置；关闭后贴底滚动交给 Harness（Harness 0.1.7 起默认关闭）。',
   preset: '手感预设',
   presetHint: '文字吐字节奏与视口跟随阻尼风格。',
   presetRealtime: '激进快速 (realtime)',

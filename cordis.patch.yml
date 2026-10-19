@@ -8,3 +8,5 @@
         revealCharsPerSec: 80
         scrollSpeedPxPerSec: 48
         maxScrollSpeedPxPerSec: 1000
+        # Harness 0.1.7+: leave bottom-follow to the kernel by default; set true to restore the engine.
+        controlScroll: false

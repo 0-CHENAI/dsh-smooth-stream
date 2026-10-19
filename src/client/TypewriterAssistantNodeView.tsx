@@ -1,7 +1,8 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode, type RefObject } from 'react'
-import { JsonBlock, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
-import { ImageGallery, type ImageLoader, type MessageImageLabels } from '@deepseek-ai/dsh-client-ui-attachment'
+import { JsonBlock, MarkdownText, ImageGallery } from './primitives-compat.tsx'
+import type { ImageLoader, MessageImageLabels } from '@deepseek-ai/dsh-client-ui-attachment'
 import type { ChatNodeViewProps, TurnTailOwnerProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import { belongsToFlowPart } from './flowPart.ts'
 import { AnimatedDisclosure } from './AnimatedDisclosure.tsx'
 import { IconThink } from './harnessIcons.ts'
 import { notifyFollowCommit } from './teleprompterGlide.ts'
@@ -16,6 +17,16 @@ import css from './TypewriterAssistantNodeView.module.css'
 
 type AssistantProps = ChatNodeViewProps<'assistant-step'>
 type MarkdownProps = Pick<ComponentProps<typeof MarkdownText>, 'labels' | 'fileMentions' | 'text'>
+
+/**
+ * Kernel seat for one expanded reasoning body. The takeover never names the
+ * registry key itself: `index.ts` dispatches the kernel's
+ * `conversation.chat.reasoning.body` child slot and hands the result here.
+ * @param text - the reasoning text to render, already smoothed.
+ * @param running - whether this block is still the streaming tail.
+ * @returns the kernel's own body contribution.
+ */
+export type ReasoningBodySeat = (text: string, running: boolean) => ReactNode
 
 function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = useState(
@@ -372,7 +383,7 @@ function imageLabels(t: AssistantProps['t']): MessageImageLabels {
 }
 
 /**
- * Apply searchable hidden state without unmounting a stable subtree — the
+ * Apply searchable hidden state without unmounting a stable subtree 鈥?the
  * Host's completion fold hides the answer-inline reasoning this way, so the
  * takeover renderer must reproduce it to stay inside the contract: the row
  * disappears into the Host's process summary and comes back on find-in-page.
@@ -442,8 +453,8 @@ function latestLine(text: string): string {
  * click stay on the disclosure chrome, which the plugin's AnimatedDisclosure
  * renders with a height-animated body (the harness primitive would mount and
  * unmount it, which cannot glide). The row opens only while this block is
- * the streaming tail and closes as soon as thinking ends — a later block,
- * or the assistant node settling — not when the rest of the reply is
+ * the streaming tail and closes as soon as thinking ends 鈥?a later block,
+ * or the assistant node settling 鈥?not when the rest of the reply is
  * still streaming.
  */
 function AnimatedReasoning({
@@ -456,6 +467,9 @@ function AnimatedReasoning({
   shouldHoldBack,
   followSpeedCpsRef,
   followRevealScaleRef,
+  snapAutoCollapse,
+  eager = false,
+  renderBody,
   t,
 }: {
   text: string
@@ -467,6 +481,19 @@ function AnimatedReasoning({
   shouldHoldBack: () => boolean
   followSpeedCpsRef?: { current: number } | undefined
   followRevealScaleRef?: { current: number } | undefined
+  /** 0.1.x single rows snap the auto-close and let their follower absorb the step; on 0.2.x the collapse lands exactly at the ownership handoff, so it must glide. */
+  snapAutoCollapse: boolean
+  /** Whether this reasoning block belongs to the active or latest turn (for lazy translation gating). */
+  eager?: boolean | undefined
+  /**
+   * Kernel seat for the expanded reasoning body, present only when a feature
+   * other than the kernel's own default replaced
+   * `conversation.chat.reasoning.body`. The takeover then renders that
+   * contribution instead of its own body, so host-native translations and any
+   * later reasoning-body feature keep working; the plugin's own display-layer
+   * translation stays out of the way while it does.
+   */
+  renderBody?: ReasoningBodySeat | undefined
   t: AssistantProps['t']
 }) {
   const reduced = motionReduced
@@ -488,7 +515,7 @@ function AnimatedReasoning({
   const followActiveRef = useRef(false)
   followActiveRef.current = running && expanded
   const commitAnchorRef = useRef<HTMLDivElement>(null)
-  // The running→false flip is the AUTO-close: it collapses instantly and the
+  // The running鈫抐alse flip is the AUTO-close: it collapses instantly and the
   // follower's settle spring absorbs the height step. A later manual toggle
   // keeps the CSS glide.
   const displayed = useSmoothStreamContent(text, {
@@ -500,7 +527,116 @@ function AnimatedReasoning({
     onRevealCommit: () => { notifyFollowCommit(commitAnchorRef.current) },
   })
   const shown = running && !reduced ? displayed : text
-  const summary = running ? latestLine(shown) : firstLine(text)
+  const [translation, setTranslation] = useState<{ key: string; text: string } | null>(null)
+  const translationKeyRef = useRef<string>('')
+  const inFlightRef = useRef<{ controller: AbortController; key: string } | null>(null)
+  // A kernel feature owns the expanded body: draw it and leave translation to
+  // it, because two translations in one reasoning row would disagree.
+  const ownsBody = renderBody === undefined
+  let enabled = true
+  let lang = 'zh-CN'
+  let mode = 'lazy'
+  try {
+    if (ownsBody && !running && typeof localStorage !== 'undefined') {
+      enabled = localStorage.getItem('dsh-think-translate:think') !== 'false'
+      lang = localStorage.getItem('dsh-think-translate:lang') || 'zh-CN'
+      mode = localStorage.getItem('dsh-think-translate:mode') || 'lazy'
+    }
+  } catch {
+    // Storage read errors fall back to defaults.
+  }
+  const cacheKey = `${lang}|${text}`
+  // A settled block can change without a running phase; only show its own translation.
+  const visibleTranslation = ownsBody && !running && enabled && translation?.key === cacheKey
+    ? translation.text
+    : null
+
+  useEffect(() => {
+    // A kernel feature owns the body; this plugin keeps no translation state of
+    // its own for the block.
+    if (!ownsBody) {
+      setTranslation(null)
+      translationKeyRef.current = ''
+      inFlightRef.current?.controller.abort()
+      inFlightRef.current = null
+      return
+    }
+    // 1. Defer translation until the block settles to keep typewriter motion pure
+    // and avoid flooding the backend with partial streaming text snapshots.
+    if (running) {
+      setTranslation(null)
+      translationKeyRef.current = ''
+      inFlightRef.current?.controller.abort()
+      inFlightRef.current = null
+      return
+    }
+    if (!text || !text.trim()) {
+      setTranslation(null)
+      translationKeyRef.current = ''
+      inFlightRef.current?.controller.abort()
+      inFlightRef.current = null
+      return
+    }
+    if (!enabled) {
+      setTranslation(null)
+      translationKeyRef.current = ''
+      inFlightRef.current?.controller.abort()
+      inFlightRef.current = null
+      return
+    }
+
+    // 2. Honor sibling plugin's translation timing modes:
+    // - 'eager': translates all rows
+    // - 'lazy' (default): translates latest/active row eagerly, waits for historical rows to expand
+    // - 'expand': waits for any row to expand
+    const shouldTranslate = mode === 'eager' || (mode === 'lazy' && eager) || expanded
+    if (!shouldTranslate) {
+      return
+    }
+
+    // Request ownership is independent of disclosure toggling: if already translated
+    // or currently fetching the exact text, do not duplicate or abort in flight.
+    if (translationKeyRef.current === cacheKey || inFlightRef.current?.key === cacheKey) return
+
+    inFlightRef.current?.controller.abort()
+    const controller = new AbortController()
+    inFlightRef.current = { controller, key: cacheKey }
+
+    // 3. Only commit the cache key once the request succeeds.
+    fetch('/_xlate/translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, target: lang }),
+      signal: controller.signal,
+    })
+      .then(async res => (res.ok ? res.json() : null))
+      .then(data => {
+        if (controller.signal.aborted) return
+        if (data && data.ok && !data.skipped && typeof data.text === 'string' && data.text.trim() && data.text !== text) {
+          translationKeyRef.current = cacheKey
+          setTranslation({ key: cacheKey, text: data.text })
+        }
+      })
+      .catch(() => {
+        // Fall back gracefully when the endpoint is inactive or unreachable.
+      })
+      .finally(() => {
+        if (inFlightRef.current?.controller === controller) {
+          inFlightRef.current = null
+        }
+      })
+  }, [ownsBody, text, running, expanded, eager, enabled, lang, mode])
+
+  useEffect(() => {
+    return () => {
+      inFlightRef.current?.controller.abort()
+      inFlightRef.current = null
+    }
+  }, [])
+
+  const summary = running
+    ? latestLine(shown)
+    : (visibleTranslation ? firstLine(visibleTranslation) : firstLine(text))
   useLogarithmicFade(fadeRootRef, logarithmicFade && !reduced && expanded, running, fadeSpeedRef)
 
   useLayoutEffect(() => {
@@ -522,7 +658,7 @@ function AnimatedReasoning({
   useEffect(() => {
     // Only the live stream owns the reading position. A settled block is
     // something to read from the top, so expanding a finished reasoning card
-    // must not scroll it — that would make its first lines unreachable.
+    // must not scroll it 鈥?that would make its first lines unreachable.
     if (!running || !expanded || userScrolledRef.current) return
     const el = thinkBodyRef.current
     if (el === null) return
@@ -597,6 +733,14 @@ function AnimatedReasoning({
     element.scrollLeft = running ? element.scrollWidth - element.clientWidth : 0
   }, [running, summary])
 
+  // The kernel renders its body Seat only inside an open disclosure, so the
+  // contribution is mounted exactly there. While closed the takeover draws its
+  // own smoothed text underneath (the collapsed track is fully clipped), which
+  // keeps the height glide and leaves the feature unmounted — and therefore
+  // untranslated — until the reader opens the block, exactly as the kernel's
+  // own ReasoningRow leaves it.
+  const hostedBody = expanded && renderBody !== undefined ? renderBody(shown, running) : undefined
+
   // Preserve FollowHost's layout wrapper without mounting a second scroll owner.
   return (
     <div className={css.follow} ref={commitAnchorRef}>
@@ -622,11 +766,14 @@ function AnimatedReasoning({
             setAutoClosed(false)
             setExpanded(value => !value)
           }}
-          // The auto-close at stream end snaps (no grid-track animation): the
-          // follower's settle spring absorbs the height step through the
-          // compositor, so animating the track too would double-animate the
-          // collapse. Manual toggles while streaming keep the glide.
-          bodyTransition={!autoClosed}
+          // The auto-close at stream end snaps on 0.1.x (no grid-track
+          // animation): the single row's follower absorbs the height step
+          // through the compositor, so animating the track too would
+          // double-animate the collapse. On 0.2.x the collapse lands exactly
+          // at the ownership handoff with nothing left to absorb it, so the
+          // track itself glides and the floor retreats gradually instead of
+          // teleporting. Manual toggles while streaming keep the glide.
+          bodyTransition={!autoClosed || !snapAutoCollapse}
           collapsedContent={(
             <>
               <span className={css.thinkSeparator} aria-hidden />
@@ -634,7 +781,23 @@ function AnimatedReasoning({
             </>
           )}
         >
-          <div ref={fadeRootRef} className={css.thinkBody}>{shown}</div>
+          <div ref={fadeRootRef} className={css.thinkBody}>
+            {hostedBody !== undefined ? (
+              hostedBody
+            ) : visibleTranslation ? (
+              <>
+                <div className={css.thinkTranslation}>{visibleTranslation}</div>
+                <details className={css.thinkOriginal}>
+                  <summary className={css.thinkOriginalSummary}>
+                    {(t as unknown as (key: string) => string)('message.original')}
+                  </summary>
+                  <div className={css.thinkOriginalBody}>{shown}</div>
+                </details>
+              </>
+            ) : (
+              shown
+            )}
+          </div>
         </AnimatedDisclosure>
       </div>
     </div>
@@ -669,14 +832,25 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   loadImage,
   fileMentions,
   turnProcess,
+  renderReasoningBody,
   t,
 }: AssistantProps & {
   /**
-   * 0.2 splits one assistant step into a reasoning seat and a response seat.
-   * Older hosts omit it, and the whole step still renders together.
+   * dsh 0.2.x row split for one assistant step: the flow mounts the node
+   * twice — once with `groupPart: 'reasoning'` (reasoning blocks only) and
+   * once with `groupPart: 'response'` (everything else). Absent on 0.1.x,
+   * where the step renders as a single row; the pinned type predates the
+   * field, so it is declared here and erased at compile time.
    */
   groupPart?: 'reasoning' | 'response' | undefined
-} & {
+  /**
+   * Kernel reasoning-body seat, supplied by the takeover only when the
+   * kernel's own default was replaced at `conversation.chat.reasoning.body`
+   * (see `index.ts`). Absent on older kernels, on the shadow fallback that
+   * declares no children, and whenever the default still owns the slot; the
+   * renderer then keeps full ownership of the reasoning body.
+   */
+  renderReasoningBody?: ReasoningBodySeat | undefined
   mode?: StreamMode
   preset?: StreamSmoothingPreset
   revealCharsPerSec?: number
@@ -689,6 +863,27 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
 }) {
   const data = node.data
   const streaming = data.status === 'running'
+  // dsh 0.2.x mounts the assistant step twice with a `groupPart` split: the
+  // `reasoning` row carries the reasoning blocks and the `response` row the
+  // rest. Mirrors the built-in AssistantMarkdown filter so the takeover does
+  // not render every block in both rows (which duplicated each reasoning
+  // paragraph in the transcript on 0.2.x).
+  const blocks = data.blocks.filter(block => belongsToFlowPart(block, groupPart))
+  // dsh 0.2.x mounts this view twice on the same conversation scrollport —
+  // the reasoning row above and the response row below. Handing the port to
+  // whichever row carries the streaming tail still left the think phase
+  // jumpy: while reasoning streamed, the reasoning-row host owned the port
+  // from a mid-transcript anchor (the empty response row and the turn status
+  // render below it), and the viewport hopped upward as the glide steered
+  // toward positions its bottom-row tuning does not describe. The response
+  // row is the geometric bottom row for the whole turn, so owning it from
+  // the first streamed block reproduces the 0.1.x single-row configuration
+  // the glide was tuned for: think growth happens above the anchor, the
+  // text reveal grows inside it, and ownership never flips mid-turn. The
+  // reasoning row never touches the port — its think box paces its own
+  // reveal and auto-scrolls internally. 0.1.x mounts a single row
+  // (groupPart undefined) and keeps the previous behavior.
+  const rowOwnsPort = groupPart !== 'reasoning'
   const reduced = useMotionReduced(motionPreference)
   // The Host's completion-fold decision for THIS node's inline reasoning:
   // only the answer step folds, only in compact-transcript mode, and only
@@ -708,15 +903,15 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   const [textRevealActive, setTextRevealActive] = useState(false)
   const completionCandidate = !streaming
     && previousStreamingRef.current
-    && data.blocks.some(block => block.kind === 'text' && block.text.trim() !== '')
+    && blocks.some(block => block.kind === 'text' && block.text.trim() !== '')
   useLayoutEffect(() => {
     previousStreamingRef.current = streaming
   }, [streaming])
   const updateTextRevealActivity = useCallback((active: boolean): void => {
     setTextRevealActive(previous => previous === active ? previous : active)
   }, [])
-  const reasoningTailIndex = streaming && data.blocks[data.blocks.length - 1]?.kind === 'reasoning'
-    ? data.blocks.length - 1
+  const reasoningTailIndex = streaming && blocks[blocks.length - 1]?.kind === 'reasoning'
+    ? blocks.length - 1
     : -1
   const reasoningOwnsSpeed = reasoningTailIndex !== -1
   const rootPredictiveRef = useRef(false)
@@ -744,6 +939,10 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
     if (tail?.closing?.finalNode.seq !== data.finalNode.seq) return undefined
     return { turn, seq: data.finalNode.seq, openFile }
   }, [data.finalNode, openFile, tail, turn])
+  const isLatest = !streaming
+    && data.finalNode !== undefined
+    && tail?.closing?.finalNode.seq === data.finalNode.seq
+  const eager = streaming || isLatest
   const mentions = useMemo(
     () => owner === undefined ? undefined : fileMentions(owner),
     [fileMentions, owner],
@@ -755,29 +954,35 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
   const imageLoader: ImageLoader = loadImage ?? (async () => {
     throw new Error(t('image.serviceUnavailable'))
   })
-  const visibleBlock = (kind: string): boolean => (
-    groupPart === undefined
-    || (groupPart === 'reasoning' ? kind === 'reasoning' : kind !== 'reasoning')
-  )
-  const hasContent = data.blocks.some(block => visibleBlock(block.kind) && block.kind !== 'tool-call')
-  if (!(streaming || data.status === 'interrupted' || hasContent)) return null
-  const announcementText = data.blocks
-    .flatMap(block => block.kind === 'text' && visibleBlock(block.kind) ? [block.text] : [])
+  const hasVisible = streaming
+    || data.status === 'interrupted'
+    || blocks.some(block => block.kind !== 'tool-call')
+  if (!hasVisible) return null
+  const announcementText = blocks
+    .filter(block => block.kind === 'text')
+    .map(block => block.text)
     .join('\n')
+  // 0.2.x reasoning rows see a blocks array filtered to reasoning only, so
+  // `index === last` stays true while a later tool-call or text block runs in
+  // the same step — the disclosure then waits for the whole step to settle
+  // before snapping shut, and that late full-height collapse jumps the page.
+  // Tail-ness must be judged against the ORIGINAL step blocks: any later
+  // block of any kind closes the think box promptly, exactly as the 0.1.x
+  // single-row layout did by construction.
+  const stepTailIsReasoning = data.blocks[data.blocks.length - 1]?.kind === 'reasoning'
 
   const rendered: ReactNode[] = []
-  const last = data.blocks.length - 1
+  const last = blocks.length - 1
   let lastFollow = -1
   let lastText = -1
-  for (let index = 0; index < data.blocks.length; index += 1) {
-    const kind = data.blocks[index]?.kind
-    if (kind === undefined || !visibleBlock(kind)) continue
+  for (let index = 0; index < blocks.length; index += 1) {
+    const kind = blocks[index]?.kind
     if (kind === 'text' || kind === 'reasoning') lastFollow = index
     if (kind === 'text') lastText = index
   }
-  for (let index = 0; index < data.blocks.length; index += 1) {
-    const block = data.blocks[index]
-    if (block === undefined || !visibleBlock(block.kind)) continue
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index]
+    if (block === undefined) continue
     switch (block.kind) {
       case 'text':
         if (!streaming && block.text.trim() === '') break
@@ -805,7 +1010,7 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
           <FoldableReasoning key={index} hidden={reasoningHidden} reveal={revealProcess}>
             <AnimatedReasoning
               text={block.text}
-              running={streaming && index === last}
+              running={streaming && index === last && (groupPart !== 'reasoning' || stepTailIsReasoning)}
               preset={preset}
               thinkAutoExpand={thinkAutoExpand}
               logarithmicFade={logarithmicFade && data.status !== 'interrupted'}
@@ -813,6 +1018,9 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
               shouldHoldBack={shouldHoldBack}
               followSpeedCpsRef={reasoningOwnsSpeed && index === last ? rootSpeedRef : undefined}
               followRevealScaleRef={reasoningOwnsSpeed && index === last ? rootRevealScaleRef : undefined}
+              snapAutoCollapse={groupPart === undefined}
+              eager={eager}
+              renderBody={renderReasoningBody}
               t={t}
             />
           </FoldableReasoning>,
@@ -821,8 +1029,8 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
       case 'image': {
         const start = index
         const group = [block]
-        while (index + 1 < data.blocks.length) {
-          const next = data.blocks[index + 1]
+        while (index + 1 < blocks.length) {
+          const next = blocks[index + 1]
           if (next === undefined || next.kind !== 'image') break
           group.push(next)
           index += 1
@@ -859,7 +1067,7 @@ export const TypewriterAssistantNodeView = memo(function TypewriterAssistantNode
         revealedCharsRef={rootRevealedCharsRef}
         revealScaleRef={rootRevealScaleRef}
         predictiveRef={rootPredictiveRef}
-        controlScroll={controlScroll}
+        controlScroll={controlScroll && rowOwnsPort}
       >
         <div className={css.body}>
           {rendered}

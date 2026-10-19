@@ -28,6 +28,13 @@ export interface StreamConfig {
   readonly scrollSpeedPxPerSec: number
   /** Unused at runtime; retained so existing overlays continue to load. */
   readonly maxScrollSpeedPxPerSec: number
+  /**
+   * Whether the follow engine writes the conversation scroll position.
+   * Projection-based kernels (0.1.7 and later) default to native Harness
+   * scrolling. Set this field to true in the profile or settings page to
+   * restore takeover. The older settings registry keeps its default-on toggle.
+   */
+  readonly controlScroll: boolean
 }
 
 /** Defaults shared by the Host schema and the client-side fallback. */
@@ -37,6 +44,7 @@ export const DEFAULT_STREAM_CONFIG: StreamConfig = {
   revealCharsPerSec: 80,
   scrollSpeedPxPerSec: 48,
   maxScrollSpeedPxPerSec: 1000,
+  controlScroll: false,
 }
 
 /**

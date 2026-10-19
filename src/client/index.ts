@@ -1,4 +1,4 @@
-import { createElement, useSyncExternalStore, type ComponentType } from 'react'
+import { createElement, useMemo, useSyncExternalStore, type ComponentType, type ReactNode } from 'react'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: the connection Context merge and the plugins section's SlotMap
@@ -6,9 +6,18 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import { TypewriterAssistantNodeView } from './TypewriterAssistantNodeView.tsx'
+import { markdownAvailable } from './primitives-compat.tsx'
+import { TypewriterAssistantNodeView, type ReasoningBodySeat } from './TypewriterAssistantNodeView.tsx'
+import type { AssistantStepPart } from './flowPart.ts'
 import { wrapFollowNodeView, type FollowWrapProps } from './TypewriterToolNodeView.tsx'
 import { SmoothStreamCard } from './SmoothStreamCard.tsx'
+import { SmoothStreamPluginsPage } from './SmoothStreamPluginsPage.tsx'
+
+// Exported so the offline verifier can render the built bundle exactly as the
+// two hosts do — the components are the only carriers of the switches, and the
+// client specs cannot run against prebuilt bundles.
+export { SmoothStreamCard, type SmoothStreamCardProps } from './SmoothStreamCard.tsx'
+export { SmoothStreamPluginsPage, type SmoothStreamPluginsPageProps } from './SmoothStreamPluginsPage.tsx'
 import { SmoothStreamCardController } from './smooth-stream-card-controller.ts'
 import { createSmoothStreamSettingsApi } from './smooth-stream-settings-api.ts'
 import { DebugPanel } from './DebugPanel.tsx'
@@ -26,6 +35,61 @@ import { DEFAULT_STREAM_SETTINGS, STREAM_SETTINGS_NS, type StreamSettings } from
 export const inject = ['slots']
 
 type AssistantProps = ChatNodeViewProps<'assistant-step'>
+
+/**
+ * Structural view of the slot registry for the 0.1.7 sidebar Plugins page.
+ *
+ * The page's `plugins.bundle.config` keyed slot is absent from the client typings this
+ * package pins (`0.1.0-rc.6`), and one registration only ever needs `inject` and
+ * `register`, so those two methods are named here rather than widening the whole
+ * registry.
+ */
+interface PluginsPageSlots {
+  inject(slot: string, register: () => unknown): unknown
+  register(options: Record<string, unknown>, component: unknown): unknown
+}
+
+/**
+ * Structural view of the kernel's `conversation.chat.reasoning.body` dispatch
+ * seat. The client typings this package pins predate that child slot, and the
+ * takeover only ever dispatches this one key, so the seat is named
+ * structurally rather than widening the whole registry.
+ */
+interface ReasoningBodyDispatch {
+  (key: 'conversation.chat.reasoning.body', owner: { text: string; running: boolean }): ReactNode
+}
+
+/** uSES-compatible boolean store for one slot-derived fact. */
+interface SlotFact {
+  readonly getSnapshot: () => boolean
+  readonly subscribe: (listener: () => void) => () => void
+  /** Re-read the registry and wake subscribers only when the fact flipped. */
+  readonly sync: () => void
+}
+
+/**
+ * Build a boolean signal over a live registry read, so a rendered view can
+ * follow a slot's contribution count without polling it.
+ * @param read - reads the current truth from the registry.
+ * @returns the signal, seeded from the first read.
+ */
+function createSlotFact(read: () => boolean): SlotFact {
+  let value = read()
+  const listeners = new Set<() => void>()
+  return {
+    getSnapshot: () => value,
+    subscribe: (listener) => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    sync: () => {
+      const next = read()
+      if (next === value) return
+      value = next
+      for (const listener of listeners) listener()
+    },
+  }
+}
 
 const STREAM_MODES: readonly string[] = ['typewriter', 'teleprompter']
 const STREAM_PRESETS: readonly string[] = ['realtime', 'balanced', 'silky']
@@ -70,6 +134,22 @@ const SKIP_WRAP = new Set([
 function isWrappableComponent(value: unknown): value is ComponentType<FollowWrapProps> {
   return typeof value === 'function'
     || (value !== null && typeof value === 'object' && '$$typeof' in value)
+}
+
+/**
+ * Registrant diagnostics label of one stored entry.
+ *
+ * Every published kernel records it on the entry itself
+ * (`StoredEntry.registrant`), never inside `options`: the older
+ * `options`-shaped read below never matched a real runtime, which left the
+ * takeover's own registrations excluded only by component identity. Read the
+ * real field, and keep the `options` shape as a defensive fallback.
+ * @param entry - one entry from `slots.entries`.
+ * @returns the registrant label, or undefined when the kernel recorded none.
+ */
+function entryRegistrant(entry: object): string | undefined {
+  const shaped = entry as { registrant?: string | undefined; options?: { registrant?: string | undefined } }
+  return shaped.registrant ?? shaped.options?.registrant
 }
 
 /**
@@ -239,6 +319,32 @@ export function apply(ctx: ClientContext): void {
   )
 
   /**
+   * Whether a feature other than the kernel's own default replaced the
+   * expanded reasoning Body.
+   *
+   * The takeover draws reasoning itself, so it never dispatches
+   * `conversation.chat.reasoning.body` and every contribution there is
+   * silently dropped — dsh 0.2.x's native chain-of-thought translation
+   * included. The kernel registers exactly one default Body the moment the
+   * built-in assistant-step entry declares that child slot, so a second entry
+   * is by definition a replacement; the takeover then hands the expanded body
+   * back to the slot instead of owning it.
+   *
+   * `entries()` returns one cached array per key between mutations, so its
+   * length is a stable external-store snapshot, and the slot's own
+   * `slots/changed` notification covers a translation plugin that mounts
+   * after this one.
+   */
+  const reasoningBodyReplaced = createSlotFact(
+    () => ctx.slots.entries('conversation.chat.reasoning.body' as never).length > 1,
+  )
+  ctx.on('slots/changed', (key: string) => {
+    if (key === 'conversation.chat.reasoning.body' || key === 'conversation.chat.node') {
+      reasoningBodyReplaced.sync()
+    }
+  })
+
+  /**
    * Layered `t` for the assistant renderer.
    *
    * The renderer's keys have no single owner: `conversation` owns the
@@ -326,8 +432,24 @@ export function apply(ctx: ClientContext): void {
       locale: SETTINGS_NS,
       inject: () => card.inject(),
     // Older Harness declares this slot as a list (`id`); newer Harness uses a
-    // keyed slot filtered by the Host settings namespace (`key`).
+    // keyed slot filtered by the Host settings namespace (`key`); 0.2.x
+    // dropped the slot entirely, so this registration simply stays pending and
+    // the Plugins panel below is the only settings surface — exactly the
+    // 0.1.7+ direction, taken to its end.
     } as never, SmoothStreamCard))
+    // 0.1.7 moved plugin configuration out of Settings into the sidebar's
+    // Plugins panel. The same controller feeds its bundle configuration.
+    // On 0.1.5 the bundle slot is absent, leaving registration pending, and
+    // this registration pending and keeps showing the card in Settings. The
+    // registry is narrowed structurally because the pinned 0.1.5 client typings
+    // do not declare that slot at all.
+    const pageSlots = settingsCtx.slots as unknown as PluginsPageSlots
+    pageSlots.inject('plugins.bundle.config', () => pageSlots.register({
+      name: 'plugins.bundle.config',
+      key: 'dsh-smooth-stream',
+      locale: SETTINGS_NS,
+      inject: () => card.inject(),
+    }, SmoothStreamPluginsPage))
     settingsCtx.slots.inject('conversation.session.header.utilities', () => settingsCtx.slots.register({
       name: 'conversation.session.header.utilities',
       id: 'smooth-stream-debug',
@@ -349,8 +471,35 @@ export function apply(ctx: ClientContext): void {
       settings.getSnapshot,
       settings.getSnapshot,
     )
+    // The swap preserves the built-in entry's children table, so the kernel
+    // hands this component the same child-seat dispatch the built-in row
+    // consumed. The shadow fallback declares no children and therefore gets
+    // none; there the renderer keeps owning the reasoning body as before.
+    const foreignBodyPresent = useSyncExternalStore(
+      reasoningBodyReplaced.subscribe,
+      reasoningBodyReplaced.getSnapshot,
+      reasoningBodyReplaced.getSnapshot,
+    )
+    const dispatch = (props as { renderSlot?: ReasoningBodyDispatch }).renderSlot
+    const renderReasoningBody = useMemo<ReasoningBodySeat | undefined>(
+      () => foreignBodyPresent && dispatch !== undefined
+        ? (bodyText: string, bodyRunning: boolean) =>
+          dispatch('conversation.chat.reasoning.body', { text: bodyText, running: bodyRunning })
+        : undefined,
+      [dispatch, foreignBodyPresent],
+    )
     return createElement(TypewriterAssistantNodeView, {
       ...props,
+      // Kernels from 0.1.7 place one assistant step at two flow parts — the
+      // reasoning member of the Turn's process disclosure and the response
+      // node — and hand the seat a `groupPart` so the renderer paints only its
+      // own blocks. The pinned kernel version does not declare the field on the
+      // seat props, so it is narrowed here and stays undefined on older kernels
+      // (which render each step once and expect every block).
+      groupPart: (props as { groupPart?: AssistantStepPart }).groupPart,
+      // Hand the kernel's reasoning Body back to whoever replaced it; without
+      // a replacement the takeover keeps the body and its own translation.
+      renderReasoningBody,
       // Override the seat's single-namespace binding with the layered lookup
       // described above. Falls back to the seat's own binding only if the
       // locale service never arrived (renderer then receives the prop it
@@ -374,39 +523,95 @@ export function apply(ctx: ClientContext): void {
   }
   ctx.slots.inject('conversation.chat.node', () => {
     let releaseTakeover: (() => void) | undefined
+    let usedSwap = false
 
     const syncTakeover = (): void => {
+      // The takeover renders assistant text itself, so it needs the kernel's
+      // markdown renderer. Without it the plugin would have to fall back to
+      // plain text — worse than the kernel's own view — so it declines the
+      // slot instead. A kernel whose primitive package renamed its exports
+      // (0.1.7 dropped the size-suffixed icons) still streams through the
+      // kernel renderer, and `primitives-compat` keeps that from being a
+      // crash that silently abdicates this entry.
+      if (!markdownAvailable) {
+        console.warn('[dsh-smooth-stream] markdown primitive unavailable; leaving assistant rendering to the kernel')
+        return
+      }
       if (!settings.takeoverEnabled()) {
-        releaseTakeover?.()
+        const release = releaseTakeover
         releaseTakeover = undefined
+        release?.()
         return
       }
       if (releaseTakeover !== undefined) return
       const unwrap = wrapAgentChatRows(ctx, useControlScroll)
-      const unshadow = ctx.slots.register({
-        name: 'conversation.chat.node',
-        key: 'assistant-step',
-        priority: -100,
-        // `conversation` (not `chat`): it is the namespace the pinned Harness
-        // actually registers, so it is the one whose keys must keep resolving.
-        // The layered `t` handed to the renderer covers what this namespace
-        // does not own. A namespace the composition does not declare would
-        // degrade every `t()` call to its raw key.
-        locale: 'conversation',
-        registrant: 'dsh-smooth-stream',
-      }, configured)
+      // dsh 0.2.x renders every keyed entry of `conversation.chat.node` as
+      // its own seat, so a lower-priority registration no longer shadows the
+      // built-in assistant row — the same assistant step then renders twice
+      // (built-in + takeover), duplicating every reasoning block in the
+      // transcript. Swap the built-in entry's component in place instead,
+      // exactly like the other keyed rows below; this keeps the original
+      // children, locale, and inject seats on every kernel generation. The
+      // shadow registration survives only as a fallback for compositions
+      // that declare no built-in assistant row to swap.
+      const builtin = ctx.slots.entries('conversation.chat.node').find(
+        entry => entry.options.key === 'assistant-step'
+          // Exclude this plugin's own fallback registration (it carries the
+          // same key) so the candidate is always a kernel-owned row.
+          && entryRegistrant(entry) !== 'dsh-smooth-stream'
+          && entry.component !== configured,
+      )
+      let unshadow: () => void
+      if (builtin !== undefined && isWrappableComponent(builtin.component)) {
+        usedSwap = true
+        const inner = builtin.component as ComponentType<FollowWrapProps>
+        builtin.component = configured
+        unshadow = () => {
+          if (builtin.component === configured) builtin.component = inner
+        }
+      } else {
+        unshadow = ctx.slots.register({
+          name: 'conversation.chat.node',
+          key: 'assistant-step',
+          priority: -100,
+          // `conversation` (not `chat`): it is the namespace the pinned Harness
+          // actually registers, so it is the one whose keys must keep resolving.
+          // The layered `t` handed to the renderer covers what this namespace
+          // does not own. A namespace the composition does not declare would
+          // degrade every `t()` call to its raw key.
+          locale: 'conversation',
+          registrant: 'dsh-smooth-stream',
+        }, configured)
+      }
       releaseTakeover = () => {
-        // Stop observing slot changes before the shadow entry is removed.
+        // Stop observing slot changes before the takeover is removed.
         unwrap()
         unshadow()
       }
     }
 
+    // If the shadow fallback was taken because the built-in assistant row
+    // had not registered yet, re-take through the in-place swap as soon as
+    // it appears, so 0.2.x never renders the row twice.
+    const offSlotChange = ctx.on('slots/changed', (key: string) => {
+      if (key !== 'conversation.chat.node' || usedSwap || releaseTakeover === undefined) return
+      if (!ctx.slots.entries('conversation.chat.node').some(entry => entry.options.key === 'assistant-step'
+        && entryRegistrant(entry) !== 'dsh-smooth-stream')) return
+      if (!settings.takeoverEnabled()) return
+      const release = releaseTakeover
+      releaseTakeover = undefined
+      release()
+      syncTakeover()
+    })
+
     const unsubscribe = settings.subscribe(syncTakeover)
     syncTakeover()
     return () => {
+      offSlotChange()
       unsubscribe()
-      releaseTakeover?.()
+      const release = releaseTakeover
+      releaseTakeover = undefined
+      release?.()
     }
   })
 }
