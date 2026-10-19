@@ -8,6 +8,7 @@ node_modules/
 *.log
 
 # Generated outputs and agent-workflow files (not sources)
+*.tgz
 repro/bundle.js
 repro/bundle.css
 repro/audit.bundle.js
